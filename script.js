@@ -1470,22 +1470,49 @@ renderVisitors();
     return (isFinite(n) ? n : 0).toFixed(2) + '%';
   }
 
-  function detectBudgetColumns(cols){
+  function columnMostlyBlank(rows, idx){
+    if(idx < 0) return true;
+    if(!rows.length) return true;
+    var nonEmpty = 0;
+    for(var i=0;i<rows.length;i++){
+      var v = rows[i][idx];
+      if(v != null && String(v).trim() !== '') nonEmpty++;
+    }
+    return (nonEmpty / rows.length) < 0.5; // fewer than half the rows populated
+  }
+
+  // Rows that represent a subtotal/grand total line rather than an actual
+  // budget item — these must be excluded from sums, or every peso in the
+  // section above them gets counted twice.
+  function isTotalRow(row){
+    return row.some(function(v){
+      return typeof v === 'string' && /\b(grand\s+)?(sub[- ]?)?total(s)?\b/i.test(v);
+    });
+  }
+
+  function detectBudgetColumns(cols, rows){
     var allocatedIdx = findColIndex(cols, function(c){ return c.indexOf('allocat') >= 0; });
     var obligatedIdx = findColIndex(cols, function(c){ return c.indexOf('obligat') >= 0; });
     var utilizedIdx  = findColIndex(cols, function(c){ return c.indexOf('utiliz') >= 0 && c.indexOf('rate') < 0; });
     if(allocatedIdx < 0 || obligatedIdx < 0 || utilizedIdx < 0) return null;
 
     var officeIdx = findColIndex(cols, function(c){ return c.indexOf('office') >= 0; });
-    // Prefer an exact "program" column (short code) over the longer
-    // "programs/projects/activities" description column.
-    var programIdx = findColIndex(cols, function(c){ return c.trim() === 'program'; });
-    if(programIdx < 0){
-      programIdx = findColIndex(cols, function(c){ return c.indexOf('plan') >= 0 || c.indexOf('funding source') >= 0; });
+
+    // Try candidate "grouping" columns in priority order, skipping any
+    // that turn out to be mostly blank (e.g. a "PROGRAM" code column that
+    // was only filled in for a few rows).
+    var candidates = [
+      findColIndex(cols, function(c){ return c.trim() === 'program'; }),
+      findColIndex(cols, function(c){ return c.indexOf('sector') >= 0; }),
+      findColIndex(cols, function(c){ return c.indexOf('plan') >= 0 || c.indexOf('funding source') >= 0; }),
+      findColIndex(cols, function(c){ return c.indexOf('program') >= 0 && c.indexOf('project') < 0 && c.indexOf('activit') < 0; }),
+      findColIndex(cols, function(c){ return c.indexOf('program') >= 0 && (c.indexOf('project') >= 0 || c.indexOf('activit') >= 0); })
+    ];
+    var programIdx = -1;
+    for(var i=0;i<candidates.length;i++){
+      if(candidates[i] >= 0 && !columnMostlyBlank(rows, candidates[i])){ programIdx = candidates[i]; break; }
     }
-    if(programIdx < 0){
-      programIdx = findColIndex(cols, function(c){ return c.indexOf('program') >= 0 && c.indexOf('project') < 0 && c.indexOf('activit') < 0; });
-    }
+
     return {allocatedIdx:allocatedIdx, obligatedIdx:obligatedIdx, utilizedIdx:utilizedIdx, officeIdx:officeIdx, programIdx:programIdx};
   }
   // --------------------------------------------------------------------------
@@ -1543,7 +1570,11 @@ renderVisitors();
     }
 
     function renderBudgetDashboard(data, bc){
-      var cols = data.cols, rows = data.rows;
+      var cols = data.cols;
+      // Exclude subtotal/grand-total rows — sheets commonly include a
+      // running total row after each section, and summing those alongside
+      // the individual line items double-counts every peso.
+      var rows = data.rows.filter(function(r){ return !isTotalRow(r); });
       var officeIdx = bc.officeIdx, programIdx = bc.programIdx;
       var allocatedIdx = bc.allocatedIdx, obligatedIdx = bc.obligatedIdx, utilizedIdx = bc.utilizedIdx;
 
@@ -1671,7 +1702,7 @@ renderVisitors();
     }
 
     function renderTableAndChart(data){
-      var budgetCols = detectBudgetColumns(data.cols);
+      var budgetCols = detectBudgetColumns(data.cols, data.rows);
       if(budgetCols){
         renderBudgetDashboard(data, budgetCols);
         return;
