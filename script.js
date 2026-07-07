@@ -1478,23 +1478,63 @@ renderVisitors();
   // so totals reflect ALL of that division's plans — not just the first
   // tab in the spreadsheet. Falls back to a single fetch (by gid, or the
   // spreadsheet's first tab) when no tab names were given.
+  //
+  // Two things this guards against:
+  //  1. Google's gviz endpoint doesn't error when a requested tab name
+  //     doesn't exist — it silently returns the spreadsheet's first tab
+  //     instead. Left unchecked, that turns into silent double-counting
+  //     (several "different" tab names all quietly returning the same
+  //     data). We detect this by comparing the actual rows returned for
+  //     each name; if two different names come back byte-identical, we
+  //     only count that data once and surface a warning naming the
+  //     tabs that likely didn't match.
+  //  2. Every row is tagged with which tab/plan it came from (mirroring
+  //     how the OAuth-connected dashboard uses each tab's title as the
+  //     plan name), so charts can group by plan even when the sheet
+  //     itself has no "program/plan" column — a tab like "1-GAD" IS the
+  //     plan, the tab title, not a cell value.
   function fetchDivisionData(cfg){
     var names = (cfg.sheetNames && cfg.sheetNames.length) ? cfg.sheetNames
       : (cfg.sheetName ? [cfg.sheetName] : [null]); // back-compat with configs saved before multi-tab support
+    var multiNamed = names.length > 1 && names[0] !== null;
+
     return Promise.all(names.map(function(name){
       var reqCfg = {sheetId: cfg.sheetId, sheetName: name || '', gid: name ? null : cfg.gid};
       return loadGvizViaJsonp(reqCfg)
         .then(extractTable)
+        .then(function(table){ return {name: name, table: table}; })
         .catch(function(err){
           var prefix = name ? ('Tab "' + name + '": ') : '';
           throw new Error(prefix + (err.message || 'Unknown error while fetching the sheet.'));
         });
-    })).then(function(tables){
-      if(tables.length === 1) return tables[0];
-      var cols = tables[0].cols;
+    })).then(function(results){
+      if(!multiNamed) return results[0].table;
+
+      // De-dupe: if two requested tab names produced byte-identical rows,
+      // the second one almost certainly didn't exist and silently fell
+      // back to the first tab in the spreadsheet rather than erroring.
+      var seenSignatures = {}; // stringified rows -> tab name that owns it
+      var unique = [];
+      var mismatchedNames = [];
+      results.forEach(function(r){
+        var sig = JSON.stringify(r.table.rows);
+        if(Object.prototype.hasOwnProperty.call(seenSignatures, sig)){
+          mismatchedNames.push(r.name);
+        } else {
+          seenSignatures[sig] = r.name;
+          unique.push(r);
+        }
+      });
+
+      var baseCols = unique[0].table.cols;
+      var cols = ['Plan / Funding Source'].concat(baseCols);
       var rows = [];
-      tables.forEach(function(t){ rows = rows.concat(t.rows); });
-      return {cols: cols, rows: rows};
+      unique.forEach(function(r){
+        r.table.rows.forEach(function(row){
+          rows.push([r.name].concat(row));
+        });
+      });
+      return {cols: cols, rows: rows, tabWarnings: mismatchedNames};
     });
   }
 
@@ -1559,8 +1599,12 @@ renderVisitors();
 
     // Try candidate "grouping" columns in priority order, skipping any
     // that turn out to be mostly blank (e.g. a "PROGRAM" code column that
-    // was only filled in for a few rows).
+    // was only filled in for a few rows). The synthetic "Plan / Funding
+    // Source" column (added when several tabs were merged together) is
+    // checked first since it's guaranteed to be a real per-plan tag, not
+    // just a possibly-sparse in-sheet column.
     var candidates = [
+      findColIndex(cols, function(c){ return c === 'plan / funding source'; }),
       findColIndex(cols, function(c){ return c.trim() === 'program'; }),
       findColIndex(cols, function(c){ return c.indexOf('sector') >= 0; }),
       findColIndex(cols, function(c){ return c.indexOf('plan') >= 0 || c.indexOf('funding source') >= 0; }),
@@ -1670,6 +1714,11 @@ renderVisitors();
         topGroups.push('Other');
       }
 
+      var groupLabel = 'Office';
+      if(programIdx >= 0){
+        groupLabel = (String(cols[programIdx]).toLowerCase() === 'plan / funding source') ? 'Plan' : 'Program';
+      }
+
       var barCanvasId = 'divBudgetBar-' + key;
       var pieCanvasId = 'divBudgetPie-' + key;
       var searchId = 'divBudgetSearch-' + key;
@@ -1684,7 +1733,7 @@ renderVisitors();
 
       if(topGroups.length){
         html += '<div class="grid" style="grid-template-columns:1.3fr 1fr; gap:14px; margin-bottom:16px;">'
-          + '<div class="card"><h3 style="margin-bottom:10px;">Budget Comparison by ' + (programIdx>=0 ? 'Program' : 'Office') + '</h3>'
+          + '<div class="card"><h3 style="margin-bottom:10px;">Budget Comparison by ' + escapeHtml(groupLabel) + '</h3>'
           + '<div class="chart-box"><canvas id="' + barCanvasId + '"></canvas></div></div>'
           + '<div class="card"><h3 style="margin-bottom:10px;">Allocation Distribution</h3>'
           + '<div class="chart-box"><canvas id="' + pieCanvasId + '"></canvas></div></div>'
@@ -1822,6 +1871,15 @@ renderVisitors();
           lastFetchedAt = new Date().toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
           statusEl.innerHTML = connStatusHtml(cfg);
           renderTableAndChart(data);
+          if(data.tabWarnings && data.tabWarnings.length){
+            var warnHtml = '<div class="card" style="padding:16px; border:1px solid var(--warn, #C8971E); margin-bottom:16px;">'
+              + '<strong style="color:var(--warn, #C8971E);">Heads up:</strong> '
+              + escapeHtml(data.tabWarnings.length === 1
+                  ? ('the tab "' + data.tabWarnings[0] + '" returned the exact same data as another tab, which usually means that name doesn\'t actually exist on the sheet (Google silently falls back to the first tab instead of erroring). It was excluded from the totals below — double-check the spelling/casing against the sheet\'s tab bar.')
+                  : ('these tabs returned the exact same data as other tabs, which usually means those names don\'t actually exist on the sheet (Google silently falls back to the first tab instead of erroring): ' + data.tabWarnings.join(', ') + '. They were excluded from the totals below — double-check spelling/casing against the sheet\'s tab bar.'))
+              + '</div>';
+            bodyEl.insertAdjacentHTML('afterbegin', warnHtml);
+          }
         })
         .catch(function(err){
           bodyEl.innerHTML = errorHtml(err.message || 'Unknown error while fetching the sheet.');
