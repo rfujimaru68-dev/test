@@ -1502,6 +1502,16 @@ renderVisitors();
       var reqCfg = {sheetId: cfg.sheetId, sheetName: name || '', gid: name ? null : cfg.gid};
       return loadGvizViaJsonp(reqCfg)
         .then(extractTable)
+        .then(function(table){
+          // Each individual tab commonly ends with its own running-sum
+          // row (a "Total"/"Grand Total" line, or sometimes just a bolded
+          // sum with no label at all). Text-matching for the word "total"
+          // misses that second case, so instead we just drop each tab's
+          // very last row outright before it ever gets summed — that's
+          // the row that was causing totals to come out roughly double.
+          if(table.rows.length > 1) table.rows = table.rows.slice(0, -1);
+          return table;
+        })
         .then(function(table){ return {name: name, table: table}; })
         .catch(function(err){
           var prefix = name ? ('Tab "' + name + '": ') : '';
