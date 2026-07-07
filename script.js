@@ -1503,6 +1503,16 @@ renderVisitors();
       return loadGvizViaJsonp(reqCfg)
         .then(extractTable)
         .then(function(table){
+          // Trailing blank spacer rows can hide the real total row one
+          // position further up (since we only ever look at the very
+          // last row) — strip those off first.
+          function isRowBlank(row){
+            return row.every(function(cell){ return cell == null || String(cell).trim() === ''; });
+          }
+          while(table.rows.length && isRowBlank(table.rows[table.rows.length - 1])){
+            table.rows = table.rows.slice(0, -1);
+          }
+
           // Some tabs end with their own running-sum row (a "Total"/"Grand
           // Total" line, or sometimes a bolded sum with no label at all).
           // Blindly dropping every tab's last row turned out to be too
@@ -1525,7 +1535,7 @@ renderVisitors();
                   for(var i=0;i<otherRows.length;i++){ expected += toNumber(otherRows[i][idx]); }
                   var actual = toNumber(lastRow[idx]);
                   if(Math.abs(expected) < 0.01) return Math.abs(actual) < 0.01;
-                  return Math.abs(actual - expected) / Math.abs(expected) < 0.005; // within 0.5%
+                  return Math.abs(actual - expected) / Math.abs(expected) < 0.01; // within 1%, to tolerate minor rounding in the sheet
                 });
               }
             }
