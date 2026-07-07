@@ -1503,13 +1503,34 @@ renderVisitors();
       return loadGvizViaJsonp(reqCfg)
         .then(extractTable)
         .then(function(table){
-          // Each individual tab commonly ends with its own running-sum
-          // row (a "Total"/"Grand Total" line, or sometimes just a bolded
-          // sum with no label at all). Text-matching for the word "total"
-          // misses that second case, so instead we just drop each tab's
-          // very last row outright before it ever gets summed — that's
-          // the row that was causing totals to come out roughly double.
-          if(table.rows.length > 1) table.rows = table.rows.slice(0, -1);
+          // Some tabs end with their own running-sum row (a "Total"/"Grand
+          // Total" line, or sometimes a bolded sum with no label at all).
+          // Blindly dropping every tab's last row turned out to be too
+          // blunt — a few tabs' real last data row got stripped too,
+          // undercounting totals. So instead: only drop it when it's
+          // actually a total row, either by label text, or — when there's
+          // no telltale label — by checking whether its Allocated/
+          // Obligated/Utilized values equal the sum of every other row
+          // in that same tab (within a tiny rounding tolerance).
+          if(table.rows.length > 1){
+            var lastRow = table.rows[table.rows.length - 1];
+            var otherRows = table.rows.slice(0, -1);
+            var looksLikeTotal = isTotalRow(lastRow);
+            if(!looksLikeTotal){
+              var bc = detectBudgetColumns(table.cols, otherRows);
+              if(bc){
+                var numericIdxs = [bc.allocatedIdx, bc.obligatedIdx, bc.utilizedIdx].filter(function(i){ return i >= 0; });
+                looksLikeTotal = numericIdxs.length > 0 && numericIdxs.every(function(idx){
+                  var expected = 0;
+                  for(var i=0;i<otherRows.length;i++){ expected += toNumber(otherRows[i][idx]); }
+                  var actual = toNumber(lastRow[idx]);
+                  if(Math.abs(expected) < 0.01) return Math.abs(actual) < 0.01;
+                  return Math.abs(actual - expected) / Math.abs(expected) < 0.005; // within 0.5%
+                });
+              }
+            }
+            if(looksLikeTotal) table.rows = otherRows;
+          }
           return table;
         })
         .then(function(table){ return {name: name, table: table}; })
