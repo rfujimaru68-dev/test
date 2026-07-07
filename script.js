@@ -1392,6 +1392,17 @@ renderVisitors();
     return m ? m[1] : null;
   }
 
+  // Many division spreadsheets follow the same pattern as the province-wide
+  // one: one tab per plan/funding source, with identical columns, and the
+  // "real" total is the SUM across every tab — not just whichever single
+  // tab happens to be first. Letting the person list several tab names
+  // (comma-separated) lets a division's own dashboard match that same
+  // all-plans total instead of silently reporting just one plan's slice.
+  function parseSheetNames(raw){
+    return String(raw || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+
+
   // Google's gviz/tq endpoint doesn't send CORS headers, so a plain fetch()
   // gets blocked by the browser regardless of sharing settings. We load it
   // the way Google's own embed widgets do: as a <script> tag (JSONP).
@@ -1459,6 +1470,32 @@ renderVisitors();
       });
     });
     return {cols: cols, rows: rows};
+  }
+
+  // Fetches one division's connected spreadsheet. If the person listed
+  // several tab names (one per plan/funding source, comma-separated),
+  // every tab is fetched and their rows are combined into a single dataset
+  // so totals reflect ALL of that division's plans — not just the first
+  // tab in the spreadsheet. Falls back to a single fetch (by gid, or the
+  // spreadsheet's first tab) when no tab names were given.
+  function fetchDivisionData(cfg){
+    var names = (cfg.sheetNames && cfg.sheetNames.length) ? cfg.sheetNames
+      : (cfg.sheetName ? [cfg.sheetName] : [null]); // back-compat with configs saved before multi-tab support
+    return Promise.all(names.map(function(name){
+      var reqCfg = {sheetId: cfg.sheetId, sheetName: name || '', gid: name ? null : cfg.gid};
+      return loadGvizViaJsonp(reqCfg)
+        .then(extractTable)
+        .catch(function(err){
+          var prefix = name ? ('Tab "' + name + '": ') : '';
+          throw new Error(prefix + (err.message || 'Unknown error while fetching the sheet.'));
+        });
+    })).then(function(tables){
+      if(tables.length === 1) return tables[0];
+      var cols = tables[0].cols;
+      var rows = [];
+      tables.forEach(function(t){ rows = rows.concat(t.rows); });
+      return {cols: cols, rows: rows};
+    });
   }
 
   function isNumericColumn(rows, idx){
@@ -1780,9 +1817,8 @@ renderVisitors();
         return;
       }
       bodyEl.innerHTML = loadingHtml();
-      loadGvizViaJsonp(cfg)
-        .then(function(json){
-          var data = extractTable(json);
+      fetchDivisionData(cfg)
+        .then(function(data){
           lastFetchedAt = new Date().toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
           statusEl.innerHTML = connStatusHtml(cfg);
           renderTableAndChart(data);
@@ -1797,20 +1833,21 @@ renderVisitors();
       var errId = 'fDivSheetError-' + key;
       var bodyHtml =
         '<div class="form-group"><label>Google Sheet link</label><input type="text" id="fDivSheetUrl-'+key+'" placeholder="https://docs.google.com/spreadsheets/d/…/edit" value="'+escapeHtml(cfg.rawUrl||'')+'"></div>'
-        + '<div class="form-group"><label>Tab / sheet name (optional)</label><input type="text" id="fDivSheetName-'+key+'" placeholder="e.g. Sheet1 — leave blank for the first tab" value="'+escapeHtml(cfg.sheetName||'')+'"></div>'
-        + '<div class="form-hint">In Google Sheets: File → Share → General access → "Anyone with the link" → Viewer. Then paste the link here.</div>'
+        + '<div class="form-group"><label>Tab / sheet name(s) (optional)</label><input type="text" id="fDivSheetName-'+key+'" placeholder="e.g. Plan 1, Plan 2, Plan 3 — leave blank for the first tab" value="'+escapeHtml((cfg.sheetNames||[]).join(', ') || cfg.sheetName || '')+'"></div>'
+        + '<div class="form-hint">In Google Sheets: File → Share → General access → "Anyone with the link" → Viewer. If this division tracks several plans/funding sources as separate tabs, list every tab name separated by commas so the totals here add up across all of them — otherwise only one tab\'s numbers will show.</div>'
         + '<div class="form-error" id="'+errId+'">Couldn\'t find a valid sheet ID in that link.</div>';
 
       openModal('Connect ' + label + "'s Google Sheet", bodyHtml, function(){
         var url = document.getElementById('fDivSheetUrl-'+key).value.trim();
-        var sheetName = document.getElementById('fDivSheetName-'+key).value.trim();
+        var sheetNameRaw = document.getElementById('fDivSheetName-'+key).value.trim();
         var id = extractSheetId(url);
         if(!id){
           document.getElementById(errId).classList.add('show');
           return false;
         }
         var gid = extractGid(url);
-        setConfig(key, {sheetId:id, sheetName:sheetName, gid:gid, rawUrl:url});
+        var sheetNames = parseSheetNames(sheetNameRaw);
+        setConfig(key, {sheetId:id, sheetNames:sheetNames, sheetName: sheetNames[0] || '', gid:gid, rawUrl:url});
         fetchAndRender();
       }, {saveLabel: cfg.sheetId ? 'Update' : 'Connect'});
 
