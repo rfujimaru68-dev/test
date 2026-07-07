@@ -1383,31 +1383,53 @@ renderVisitors();
     return null;
   }
 
+  // Many links people paste are to a *specific tab* (e.g. "…/edit#gid=123456789")
+  // rather than a named sheet. Capture that gid so we can request the right
+  // tab even when the "Tab / sheet name" field is left blank.
+  function extractGid(input){
+    input = (input || '').trim();
+    var m = input.match(/[#&]gid=([0-9]+)/);
+    return m ? m[1] : null;
+  }
+
   // Google's gviz/tq endpoint doesn't send CORS headers, so a plain fetch()
   // gets blocked by the browser regardless of sharing settings. We load it
-  // the way Google's own embed widgets do: as a <script> tag (JSONP), which
-  // isn't subject to CORS, using the built-in "google.visualization.Query.setResponse"
-  // callback name.
+  // the way Google's own embed widgets do: as a <script> tag (JSONP).
+  //
+  // IMPORTANT: each call gets its OWN uniquely-named callback (via the
+  // tqx=responseHandler:... param) instead of sharing the single default
+  // "google.visualization.Query.setResponse" name. With 5 divisions each
+  // able to fetch independently, and all of them fetching on page load,
+  // reusing one shared callback name caused a race: whichever request's
+  // script tag returned *last* would overwrite the callback and "steal"
+  // the response, so other divisions' requests would time out or resolve
+  // with the wrong division's data. A unique callback per request makes
+  // every division's fetch fully independent, matching what the UI
+  // already promises ("connecting one division's sheet has no effect on
+  // any other division").
+  var jsonpCallbackCounter = 0;
   function loadGvizViaJsonp(cfg){
     return new Promise(function(resolve, reject){
       var timeoutId;
       var scriptEl;
+      var callbackName = '__gvizCb_' + (++jsonpCallbackCounter) + '_' + Date.now();
+
       function cleanup(){
-        window.google.visualization.Query.setResponse = function(){};
+        delete window[callbackName];
         if(scriptEl && scriptEl.parentNode) scriptEl.parentNode.removeChild(scriptEl);
         clearTimeout(timeoutId);
       }
-      window.google = window.google || {};
-      window.google.visualization = window.google.visualization || {};
-      window.google.visualization.Query = window.google.visualization.Query || {};
-      window.google.visualization.Query.setResponse = function(json){
+
+      window[callbackName] = function(json){
         cleanup();
         resolve(json);
       };
 
-      var url = 'https://docs.google.com/spreadsheets/d/' + cfg.sheetId + '/gviz/tq?tqx=out:json';
-      if(cfg.gid) url += '&gid=' + encodeURIComponent(cfg.gid);
+      var url = 'https://docs.google.com/spreadsheets/d/' + cfg.sheetId + '/gviz/tq?tqx=out:json;responseHandler:' + callbackName;
+      // Prefer an explicit tab name if the user typed one; otherwise fall
+      // back to a gid captured from the pasted URL (if any).
       if(cfg.sheetName) url += '&sheet=' + encodeURIComponent(cfg.sheetName);
+      else if(cfg.gid) url += '&gid=' + encodeURIComponent(cfg.gid);
 
       scriptEl = document.createElement('script');
       scriptEl.src = url;
@@ -1787,7 +1809,8 @@ renderVisitors();
           document.getElementById(errId).classList.add('show');
           return false;
         }
-        setConfig(key, {sheetId:id, sheetName:sheetName, rawUrl:url});
+        var gid = extractGid(url);
+        setConfig(key, {sheetId:id, sheetName:sheetName, gid:gid, rawUrl:url});
         fetchAndRender();
       }, {saveLabel: cfg.sheetId ? 'Update' : 'Connect'});
 
